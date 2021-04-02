@@ -62,10 +62,9 @@ if (!opts['test']) setInterval(() => {
 
 
 
-
 if (opts['test']) {
   conn.user = {
-    jid: '2219191@s.whatsapp.net',
+    jid: '5299849@s.whatsapp.net',
     name: 'test',
     phone: {}
   }
@@ -92,14 +91,7 @@ if (opts['test']) {
     let message = await conn.prepareMessageContent(content, type, opts)
     let waMessage = conn.prepareMessageFromContent(chatId, message, opts)
     if (type == 'conversation') waMessage.key.id = require('crypto').randomBytes(16).toString('hex').toUpperCase()
-    conn.emit('chat-update', {
-      jid: conn.user.jid,
-      messages: {
-        all() {
-          return [waMessage]
-        }
-      }
-    })
+    conn.emit('message-new', waMessage)
   }
   rl.on('line', line => conn.sendMessage('123@s.whatsapp.net', line.trim(), 'conversation'))
 } else {
@@ -108,52 +100,12 @@ if (opts['test']) {
     process.send(line.trim())
   })
   conn.connect().then(() => {
-    fs.writeFileSync(authFile, JSON.stringify(conn.base64EncodedAuthInfo(), null, '\t'))
     global.timestamp.connect = new Date
   })
 }
 process.on('uncaughtException', console.error)
 // let strQuot = /(["'])(?:(?=(\\?))\2.)*?\1/
 
-let isInit = true
-global.reloadHandler = function () {
-  let handler = require('./handler')
-  if (!isInit) {
-    conn.off('chat-update', conn.handler)
-    conn.off('message-delete', conn.onDelete)
-    conn.off('group-add', conn.onAdd)
-    conn.off('group-leave', conn.onLeave)
-  }
-  conn.welcome = 'Hai, @user!\nSelamat datang di grup @subject'
-  conn.bye = 'Selamat tinggal @user!'
-  conn.handler = handler.handler
-  conn.onAdd = handler.welcome
-  conn.onLeave = handler.leave
-  conn.onDelete = handler.delete
-  conn.on('chat-update', conn.handler)
-  conn.on('message-delete', conn.onDelete)
-  conn.on('group-add', conn.onAdd)
-  conn.on('group-leave', conn.onLeave)
-  if (isInit) {
-    conn.on('error', conn.logger.error)
-    conn.on('close', () => {
-      setTimeout(async () => {
-        try {
-          if (conn.state === 'close') {
-            if (fs.existsSync(authFile)) await conn.loadAuthInfo(authFile)
-            await conn.connect()
-            fs.writeFileSync(authFile, JSON.stringify(conn.base64EncodedAuthInfo(), null, '\t'))
-            global.timestamp.connect = new Date
-          }
-        } catch (e) {
-          conn.logger.error(e)
-        }
-      }, 5000)
-    })
-  }
-  isInit = false
-  return true
-}
 
 // Plugin Loader
 let pluginFolder = path.join(__dirname, 'plugins')
