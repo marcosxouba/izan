@@ -1,13 +1,12 @@
 require('./config.js')
-let { WAConnection: _WAConnection } = require('@adiwajshing/baileys')
+let { WAConnection: _WAConnection, WA_MESSAGE_STUB_TYPES } = require('@adiwajshing/baileys')
 let { generate } = require('qrcode-terminal')
+let { spawnSync } = require('child_process')
 let syntaxerror = require('syntax-error')
 let simple = require('./lib/simple')
-//  let logs = require('./lib/logs')
-let { promisify } = require('util')
+let logs = require('./lib/logs')
 let yargs = require('yargs/yargs')
 let Readline = require('readline')
-let cp = require('child_process')
 let qrcode = require('qrcode')
 let path = require('path')
 let fs = require('fs')
@@ -16,7 +15,7 @@ let rl = Readline.createInterface(process.stdin, process.stdout)
 let WAConnection = simple.WAConnection(_WAConnection)
 
 
-global.API = (name, path = '/', query = {}, apikeyqueryname) => (name in global.APIs ? global.APIs[name] : name) + path + (query || apikeyqueryname ? '?' + new URLSearchParams(Object.entries({ ...query, ...(apikeyqueryname ? { [apikeyqueryname]: global.APIKeys[name in global.APIs ? global.APIs[name] : name] } : {}) })) : '')
+global.API = (name, path = '/', query = {}, apikeyqueryname) => (name in global.APIs ? global.APIs[name] : name) + path + (query || apikeyqueryname ? '?' + new URLSearchParams(Object.entries({...query, ...(apikeyqueryname ? { [apikeyqueryname]: global.APIKeys[name in global.APIs ? global.APIs[name] : name]} : {})})) : '')
 global.timestamp = {
   start: new Date
 }
@@ -24,7 +23,7 @@ global.timestamp = {
 const PORT = process.env.PORT || 3000
 global.opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse())
 
-global.prefix = new RegExp('^[' + (opts['prefix'] || '‎xzXZ/i!#$%+£¢€¥^°=¶∆×÷π√✓©®:;?&.\\-').replace(/[|\\{}()[\]^$+*?.\-\^]/g, '\\$&') + ']')
+global.prefix = new RegExp('^[' + (opts['prefix'] || '‎xzXZ/i!#$%+£¢€¥^°=¶∆×÷π√✓©®:;?&.-\\').replace(/[|\\{}()[\]^$+*?.]/g, '\\$&') + ']')
 
 global.DATABASE = new (require('./lib/database'))(`${opts._[0] ? opts._[0] + '_' : ''}database.json`, null, 2)
 if (!global.DATABASE.data.users) global.DATABASE.data = {
@@ -38,6 +37,7 @@ if (opts['server']) {
   let express = require('express')
   global.app = express()
   app.all('*', async (req, res) => {
+    await global.conn.connect().catch(console.log)
     res.end(await qrcode.toBuffer(global.qr))
   })
   app.listen(PORT, () => console.log('App listened on port', PORT))
@@ -45,10 +45,9 @@ if (opts['server']) {
 global.conn = new WAConnection()
 let authFile = `${opts._[0] || 'session'}.data.json`
 if (fs.existsSync(authFile)) conn.loadAuthInfo(authFile)
-if (opts['trace']) conn.logger.level = 'trace'
-if (opts['debug']) conn.logger.level = 'debug'
 if (opts['big-qr'] || opts['server']) conn.on('qr', qr => generate(qr, { small: false }))
 if (opts['server']) conn.on('qr', qr => { global.qr = qr })
+conn.on('credentials-updated', () => fs.writeFileSync(authFile, JSON.stringify(conn.base64EncodedAuthInfo())))
 let lastJSON = JSON.stringify(global.DATABASE.data)
 if (!opts['test']) setInterval(() => {
   conn.logger.info('Saving database . . .')
@@ -59,6 +58,7 @@ if (!opts['test']) setInterval(() => {
     lastJSON = JSON.stringify(global.DATABASE.data)
   }
 }, 60 * 1000) // Save every minute
+
 
 
 
@@ -106,6 +106,44 @@ if (opts['test']) {
 process.on('uncaughtException', console.error)
 // let strQuot = /(["'])(?:(?=(\\?))\2.)*?\1/
 
+let isInit = true
+global.reloadHandler = function () {
+  let handler = require('./handler')
+  if (!isInit) {
+    conn.off('message-new', conn.handler)
+    conn.off('message-delete', conn.onDelete)
+    conn.off('group-add', conn.onAdd)
+    conn.off('group-leave', conn.onLeave)
+  }
+  conn.welcome = 'Hola, @user!\nBienvenido al grupo @subject'
+  conn.bye = 'Adios @user!'
+  conn.handler = handler.handler
+  conn.onAdd = handler.welcome 
+  conn.onLeave = handler.leave
+  conn.onDelete = handler.delete
+  conn.on('message-new', conn.handler)
+  conn.on('message-delete', conn.onDelete)
+  conn.on('group-add', conn.onAdd)
+  conn.on('group-leave', conn.onLeave)
+  if (isInit) {
+    conn.on('error', conn.logger.error)
+    conn.on('close', () => {
+      setTimeout(async () => {
+        try {
+          if (conn.state === 'close') {
+            await conn.loadAuthInfo(authFile)
+            await conn.connect()
+            global.timestamp.connect = new Date
+          }
+        } catch (e) {
+          conn.logger.error(e)
+        }
+      }, 5000)
+    })
+  }
+  isInit = false
+  return true
+}
 
 // Plugin Loader
 let pluginFolder = path.join(__dirname, 'plugins')
@@ -120,7 +158,7 @@ for (let filename of fs.readdirSync(pluginFolder).filter(pluginFilter)) {
   }
 }
 console.log(Object.keys(global.plugins))
-global.reload = (_event, filename) => {
+global.reload = (event, filename) => {
   if (pluginFilter(filename)) {
     let dir = path.join(pluginFolder, filename)
     if (dir in require.cache) {
@@ -148,25 +186,16 @@ process.on('exit', () => global.DATABASE.save())
 
 
 // Quick Test
-async function _quickTest() {
-  let spawn = promisify(cp.spawn).bind(cp)
-  let [ffmpeg, ffmpegWebp, convert] = await Promise.all([
-    spawn('ffmpeg', [], {}),
-    spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-filter_complex', 'color', '-frames:v', '1', '-f', 'webp', '-'], {}),
-    spawn('convert', [], {})
-  ]).catch(conn.logger.error)
-  global.support = {
-    ffmpeg: ffmpeg.status,
-    ffmpegWebp: ffmpeg.status && ffmpegWebp.stderr.length == 0 && ffmpegWebp.stdout.length > 0,
-    convert: convert.status
-  }
-  Object.freeze(global.support)
-
-  if (!global.support.ffmpeg) conn.logger.warn('Please install ffmpeg for sending videos (pkg install ffmpeg)')
-  if (!global.support.ffmpegWebp) conn.logger.warn('Stickers may not animated without libwebp on ffmpeg (--enable-ibwebp while compiling ffmpeg)')
-  if (!global.support.convert) conn.logger.warn('Stickers may not work without imagemagick if libwebp on ffmpeg doesnt isntalled (pkg install imagemagick)')
+let ffmpeg = spawnSync('ffmpeg')
+let ffmpegWebp = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-filter_complex', 'color', '-frames:v', '1', '-f', 'webp', '-'])
+let convert = spawnSync('convert')
+global.support = {
+  ffmpeg: ffmpeg.status,
+  ffmpegWebp: ffmpeg.status && ffmpegWebp.stderr.length == 0 && ffmpegWebp.stdout.length > 0,
+  convert: convert.status
 }
+Object.freeze(global.support)
 
-/*_quickTest()
-  .then(() => conn.logger.info('Quick Test Done'))
-  .catch(console.error)*/
+if (!global.support.ffmpeg) conn.logger.warn('Please install ffmpeg for sending videos (pkg install ffmpeg)')
+if (!global.support.ffmpegWebp) conn.logger.warn('Stickers may not animated without libwebp on ffmpeg (--emable-ibwebp while compiling ffmpeg)')
+if (!global.support.convert) conn.logger.warn('Stickers may not work without imagemagick if libwebp on ffmpeg doesnt isntalled (pkg install imagemagick)')
